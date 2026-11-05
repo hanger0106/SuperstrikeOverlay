@@ -1,0 +1,3 @@
+# 打包 exe 用（build_exe.ps1）
+-r requirements.txt
+pyinstaller>=6.0

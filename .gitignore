@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- PyInstaller 產物（用 build_exe.ps1 重新產生，不要進版控）---
+build/
+dist/
+*.spec
+SuperstrikeOverlay.exe
+
+# --- 執行期設定（每台機器 / 每個人的偏好，程式會自己寫出來）---
+prox2_config.json
+
+# --- --selftest 產生的預覽圖 ---
+overlay_preview.png
+
+
+# --- 編輯器 / 作業系統 ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,4 @@
+# 執行期相依
+# superstrike-sdk 尚未發佈到 PyPI，必須從 GitHub 安裝（已鎖定 commit 以確保可重現）
+PyQt6>=6.6
+superstrike-sdk @ git+https://github.com/fawhfi/superstrike-sdk.git@e875b4bef31ed94a98933b0195dbc81135bea8b4
