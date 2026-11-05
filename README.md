@@ -1,5 +1,8 @@
 # SUPERSTRIKE Overlay
 
+**⬇️ 下載執行檔（免安裝，Windows 10 / 11 x64）**
+<https://github.com/hanger0106/SuperstrikeOverlay/releases/latest>
+
 把 Logitech **G PRO X2 SUPERSTRIKE** 的類比主鍵行程（continuous button travel）變成看得見的水波紋，
 並在按住期間自動幫你壓住 `Ctrl` / `Shift` / `Alt`。Windows 系統匣常駐小工具，單一 Python 檔即可執行。
 
