@@ -12,6 +12,11 @@ if (-not (Test-Path -LiteralPath $icon)) {
     throw "找不到 $icon"
 }
 
+# PyInstaller 的 INFO 訊息是寫到 stderr 的，Windows PowerShell 5.1 在
+# $ErrorActionPreference = 'Stop' 之下會把原生命令的 stderr 當成終止錯誤，
+# 所以打包這一段放寬，成敗一律看 $LASTEXITCODE。
+$ErrorActionPreference = 'Continue'
+
 python -m PyInstaller `
     --noconfirm `
     --clean `

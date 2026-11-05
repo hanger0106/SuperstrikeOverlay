@@ -17,6 +17,9 @@ prox2_config.json
 # --- --selftest 產生的預覽圖 ---
 overlay_preview.png
 
+# --- tools/ 診斷腳本產生的圖檔（游標截圖 / 螢幕截圖）---
+tools/_cursor_shots/
+
 
 # --- 編輯器 / 作業系統 ---
 .vscode/

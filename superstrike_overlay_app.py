@@ -23,6 +23,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 import traceback
 from ctypes import wintypes
 from pathlib import Path
@@ -87,6 +88,14 @@ DEFAULT_MODIFIER = "Alt"
 
 # 疊圖更新頻率（毫秒，16ms 約 60fps）
 POLL_INTERVAL_MS = 16
+
+# 放開修飾鍵前的緩衝（毫秒）
+#   滑鼠的「按鍵放開」事件是滑鼠韌體在行程回落時送出的，本程式則是在行程
+#   低於 off_threshold 時放開修飾鍵。兩者幾乎同時發生，修飾鍵很可能比滑鼠的
+#   放開事件更早送出 —— 拖放（drop）當下修飾鍵就已經不在，檔案總管會把
+#   「移動」做成「複製」（Alt 的話則是「建立捷徑」變「複製」）。
+#   這裡多按住一小段時間，確保滑鼠放開事件先被目標程式處理。
+RELEASE_GRACE_MS = 200
 
 # HID 讀取執行緒的單次讀取逾時（毫秒）
 HID_READ_TIMEOUT_MS = 50
@@ -189,6 +198,91 @@ def send_key(vk: int, down: bool) -> None:
 
     if sent != 1:
         log(f"SendInput failed: {ctypes.get_last_error()}")
+
+
+# ---------------------------------------------------------------------------
+# 讓疊圖視窗對 Windows 的「命中測試」完全透明（拖放不被擋）
+# ---------------------------------------------------------------------------
+#
+# Qt 的 WA_TransparentForMouseEvents 只影響 Qt 自己的事件派送，Windows 這一層
+# 仍然拿得到這個視窗。而 Windows 對 layered window 的命中測試是「按像素 alpha」
+# 判斷的：
+#
+#   * 水波紋沒畫 = 全透明（alpha = 0）→ 游標穿透，拖放正常
+#   * 水波紋畫在游標底下（alpha > 0）→ WindowFromPoint 選到疊圖視窗
+#     → OLE 拖放在那個視窗上找不到 IDropTarget → DROPEFFECT_NONE
+#     → 游標變成禁用（🚫），而且放手完全不會複製/移動
+#
+# 水波紋是「修飾鍵按下的那一刻」才開始畫的，所以症狀看起來像「注入 Shift 打斷
+# 拖放」，實際上是重疊視窗在同一個時間點變得不透明。補上 WS_EX_TRANSPARENT
+# （click-through）之後，WindowFromPoint 會一律跳過這個視窗。
+
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+
+_LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+
+_get_window_long = (
+    _user32.GetWindowLongPtrW
+    if ctypes.sizeof(ctypes.c_void_p) == 8
+    else _user32.GetWindowLongW
+)
+_set_window_long = (
+    _user32.SetWindowLongPtrW
+    if ctypes.sizeof(ctypes.c_void_p) == 8
+    else _user32.SetWindowLongW
+)
+
+_get_window_long.argtypes = (wintypes.HWND, ctypes.c_int)
+_get_window_long.restype = _LONG_PTR
+_set_window_long.argtypes = (wintypes.HWND, ctypes.c_int, _LONG_PTR)
+_set_window_long.restype = _LONG_PTR
+_user32.SetWindowPos.argtypes = (
+    wintypes.HWND,
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.UINT,
+)
+_user32.SetWindowPos.restype = wintypes.BOOL
+
+
+def make_click_through(hwnd: int) -> None:
+    """把視窗設成真正的 click-through（連 Windows 的命中測試都跳過）。"""
+
+    if not hwnd:
+        return
+
+    ex_style = int(_get_window_long(hwnd, GWL_EXSTYLE))
+    wanted = ex_style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
+
+    if wanted == ex_style:
+        return
+
+    _set_window_long(hwnd, GWL_EXSTYLE, wanted)
+
+    # 讓新的 exstyle 立刻生效
+    _user32.SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    )
+
+    log(f"click-through on: exstyle 0x{ex_style:08X} -> 0x{wanted:08X}")
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +734,9 @@ class Overlay(QWidget):
         self.key_down = False
         self.travel = 0.0
 
+        # 放開修飾鍵的排程時間點（time.monotonic），None = 沒有排程
+        self._release_deadline: float | None = None
+
         self.cursor_pos = QCursor.pos()
 
         self.setWindowFlags(
@@ -647,6 +744,7 @@ class Overlay(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowDoesNotAcceptFocus
+            | Qt.WindowType.WindowTransparentForInput
         )
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -676,6 +774,10 @@ class Overlay(QWidget):
         self.setGeometry(self._virtual_geometry())
         self.show()
 
+        # QtAttribute 只影響 Qt；這裡補上 Windows 層級的 click-through，
+        # 否則水波紋畫在游標底下時會擋掉檔案總管的拖放（見 make_click_through）
+        make_click_through(int(self.winId()))
+
     # -- 修飾鍵控制 --------------------------------------------------------
 
     def press_modifier(self) -> None:
@@ -689,6 +791,8 @@ class Overlay(QWidget):
         log(f"{self.modifier.upper()} DOWN")
 
     def release_modifier(self) -> None:
+
+        self._release_deadline = None
 
         if not self.key_down:
             return
@@ -749,18 +853,41 @@ class Overlay(QWidget):
             self.travel = travel
 
             if self.enabled:
-
-                if not self.key_down and self.travel >= self.on_threshold:
-                    self.press_modifier()
-
-                elif self.key_down and self.travel <= self.off_threshold:
-                    self.release_modifier()
+                self._update_modifier(self.travel)
 
         self.effect.update(self.key_down, self.travel)
 
         self.cursor_pos = QCursor.pos()
 
         self.update()
+
+    def _update_modifier(self, travel: float) -> None:
+        """行程 → 修飾鍵的狀態機（含放開緩衝，見 RELEASE_GRACE_MS）。
+
+        按下：行程 >= on_threshold 就按下。
+        放開：行程 <= off_threshold 後先排程，等 RELEASE_GRACE_MS 才真的放開，
+              讓滑鼠自己的「按鍵放開」事件先送到目標程式（否則拖放時修飾鍵
+              會早一步消失，總管就會用預設效果處理）。
+              排程期間若行程回升到 off_threshold 之上，排程取消。
+        """
+
+        if not self.key_down:
+            if travel >= self.on_threshold:
+                self._release_deadline = None
+                self.press_modifier()
+            return
+
+        if travel > self.off_threshold:
+            self._release_deadline = None
+            return
+
+        if self._release_deadline is None:
+            self._release_deadline = time.monotonic() + RELEASE_GRACE_MS / 1000.0
+            log(f"release scheduled (+{RELEASE_GRACE_MS}ms)")
+            return
+
+        if time.monotonic() >= self._release_deadline:
+            self.release_modifier()
 
     # -- 繪製 --------------------------------------------------------------
 
